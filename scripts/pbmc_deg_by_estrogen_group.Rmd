@@ -1,0 +1,471 @@
+---
+title: "DEGs analysis based on estrogen group in PBMC dataset"
+output: html_notebook
+---
+
+```{r}
+rm(list = ls())  # Removes all variables and functions from global environment
+getwd()
+```
+
+```{r}
+setwd("C:/Users/ngduy/Documents/Project/Final_code")
+```
+
+# Install necessary packages
+
+```{r}
+# BiocManager::install("tximport")
+# BiocManager::install("tximportData")
+# BiocManager::install("DESeq2")
+# install.packages('pheatmap')
+# install.packages("DOSE")
+# install.packages("enrichplot")
+# install.packages("ggupset")
+# BiocManager::install("biomaRt")
+# BiocManager::install("pathview")
+```
+
+# Load packages
+
+```{r}
+library(biomaRt) # BiomaRt is used to access Ensembl databases for gene annotation
+library(tximport) # Import transcript-level quantification data
+library(readr) # For reading data files
+library(DESeq2)
+library(dplyr) # for data manipulation
+library(PCAtools) # PCAtools is used for PCA analysis and visualization
+library(tidyverse) # includes ggplot2, for data visualisation. dplyr, for data manipulation.
+library(pheatmap)
+library('org.Hs.eg.db') # Annotation package for human genes
+library(GEOquery) # For downloading and processing data from GEO
+```
+
+# Data import
+
+## Import phenotype data
+
+```{r}
+metadata <- readxl::read_xlsx("../data/pbmc/pbmc_metadata.xlsx")
+metadata <- as.data.frame(metadata)
+metadata <- metadata[!is.na(metadata[[1]]),]
+
+#Because RS10, RS15 kallisto files are missing, so we get rid of these samples in metadata
+row.names(metadata) <- metadata$`RESOLVE Subject ID number`
+metadata <-metadata[!row.names(metadata) %in% c("RS10","RS15"),]
+head(metadata)
+```
+
+### Manipulate metadata to obtain necessary information
+
+In this analysis, we use the information of estradiol level, BMI, age, so we use dplyr package to select and rename the columns we need
+
+```{r}
+metadata.subset <- metadata %>%
+  dplyr::select(c(2,3,32,12)) %>%
+  dplyr::rename(estradiol = 3,
+         sex = 1,
+         age = 2,
+         BMI =4)
+# check the data
+head(metadata.subset)
+```
+
+### Grouping samples
+
+We will divide sample into 2 groups: high and low estradiol. Using the first quantile and third quantile to group the samples
+
+```{r}
+metadata.subset$group <- ""
+head(metadata.subset)
+```
+
+```{r}
+metadata.subset <- metadata.subset[!is.na(metadata.subset$estradiol),]
+first_quantile <- quantile(metadata.subset$estradiol, probs = 0.25)
+third_quantile <- quantile(metadata.subset$estradiol, probs = 0.75)
+metadata.subset$group[metadata.subset$estradiol <= first_quantile] = "low"
+metadata.subset$group[metadata.subset$estradiol >= third_quantile] = "high"
+head(metadata.subset)
+```
+
+```{r}
+# remove sample with missing value in group column
+metadata.subset <- metadata.subset[metadata.subset$group!="",]
+metadata.subset$group <- as.factor(metadata.subset$group)
+metadata.subset
+```
+
+### check the number of samples in each group
+
+```{r}
+table(metadata.subset$group)
+```
+
+## Import count data
+
+```{r}
+# Vector of folders of all samples
+samples <- row.names(metadata.subset)
+samples
+sample_folders <- paste0(samples,"_PBMC_2")
+sample_folders
+
+# Create vector of paths to each abundance file
+files <- file.path("../data/pbmc/pbmc_count_data/Kallisto abundance/PBMC",sample_folders,"abundance.tsv")
+names(files) <- samples
+
+#match transcripts and genes
+tx2gene <- read.csv("../data/pbmc/pbmc_count_data/Kallisto abundance/gene_info.txt", sep="\t",header=T)
+tx2gene <- tx2gene[,c(1,2)]
+tx2gene
+
+# load the Kallisto expression estimates using tximport
+txi <- tximport(files,
+                type = "kallisto",
+                tx2gene = tx2gene,
+                ignoreTxVersion = FALSE) 
+```
+
+# Differentially expressed genes analysis
+
+## Create DESeq2 object
+
+```{r}
+dds <- DESeqDataSetFromTximport(txi = txi, colData = metadata.subset, design = ~ age + BMI + group)
+dds
+```
+
+## Pre-filtering
+
+While it is not necessary to pre-filter low count genes before running the DESeq2 functions, there are two reasons which make pre-filtering useful: by removing rows in which there are very few reads, we reduce the memory size of the dds data object, and we increase the speed of count modeling within DESeq2. It can also improve visualizations, as features with no information for differential expression are not plotted in dispersion plots or MA-plots.
+
+Here we perform pre-filtering to keep only rows that have a count of at least 10 for a minimal number of samples. The count of 10 is a reasonable choice for bulk RNA-seq.
+
+```{r}
+keep <- rowSums(counts(dds) >= 10) >= 4 # keep rows with at least 10 counts in at least 4 samples (50% of cohort)
+dds <- dds[keep, ]
+dds
+```
+## Annotation
+```{r}
+#add gene symbol and gene name
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+all_gene_id <- row.names(dds)
+annotation <- AnnotationDbi::select(org.Hs.eg.db,
+                     keys = all_gene_id,
+                     columns = c("SYMBOL", "GENENAME", "ENTREZID"),
+                     keytype = "ENSEMBL")
+annotation <- annotation[!duplicated(annotation$ENSEMBL),] # remove duplicated rows based on ENSEMBL column
+```
+## Relevel the factor
+
+If you never tell the DESeq2 functions which level you want to compare against(e.g. which level represents the control group), the comparisons will be based on the alphabetical order of the levels.
+
+```{r}
+dds$group <- relevel(dds$group, ref = "low")
+```
+
+## Run DESeq2
+
+```{r}
+#Differential expression analysis
+dds <- DESeq(dds)
+
+raw_counts <- counts(dds, normalized = FALSE)
+head(raw_counts)
+
+# Save normalized counts
+normalized_counts <- counts(dds, normalized = TRUE)
+head(normalized_counts)
+write.csv(normalized_counts, file = "../result/pbmc/estrogen_normalized_counts.csv",)
+
+DESeq2::plotDispEsts(dds)
+```
+
+```{r}
+# summary the DEGs results
+res <- results(dds,alpha=0.05)
+summary(res)
+```
+
+So, with an adjusted p-value of 0.05, we identify 25 downregulated genes and 13 upregulated genes in the high estradiol group compared to the low estradiol group.
+
+## MA plot
+
+```{r}
+DESeq2::plotMA(res, main="MA-plot", ylim=c(-10,10))
+```
+
+## Volcano plot
+
+```{r}
+#get results table
+res.mod <- as.data.frame(res)
+
+# add gene symbol and gene name column
+res.mod$ENSEMBL <- rownames(res.mod)
+res.mod <- merge(res.mod, annotation, by = "ENSEMBL", all.x = TRUE)
+res.mod <- res.mod[order(res.mod$padj),] #order by adjusted p-value
+res.mod <- res.mod[!is.na(res.mod$SYMBOL),] # remove rows with NA in SYMBOL column
+res.mod <- res.mod[!duplicated(res.mod$SYMBOL),] # remove duplicated rows based on SYMBOL column and keep the occurrence with the lowest adjusted p-value
+res.mod
+```
+
+```{r}
+
+#add new column indicating which genes are upregulated or downregulated or not significant
+res.mod$diffexpres.modsed <- "NO"
+res.mod$diffexpres.modsed[which(res.mod$padj < 0.05 & res.mod$log2FoldChange >= 1)] <- "UP"
+res.mod$diffexpres.modsed[which(res.mod$padj < 0.05 & res.mod$log2FoldChange <= -1)] <- "DOWN"
+
+# add a gene symbol column which will be used for labeling the points in the volcano plot (only differentially expres.modsed genes)
+res.mod$delabel <- ifelse(res.mod$diffexpres.modsed =="UP" | res.mod$diffexpres.modsed =="DOWN", res.mod$SYMBOL, NA)
+
+#Vocalno plot
+volcano_plot <- ggplot(data = res.mod, aes(x=log2FoldChange, y=-log10(padj),color = diffexpres.modsed, label = delabel))+
+  geom_vline(xintercept = c(-1, 1), col = "gray", linetype = 'dashed') +
+  geom_hline(yintercept = -log10(0.05), col = "gray", linetype = 'dashed') +
+  geom_point(size = 2) +
+  scale_color_manual(values = c("#00AFBB", "grey", "#bb0c00"), # to set the colours of our variable
+                     labels = c("Downregulated", "Not significant", "Upregulated")) + # to set the labels in case we want to overwrite the categories from the dataframe
+  coord_cartesian(xlim = c(-10, 10))+
+  ggtitle("Volcano plot of DEGs between High and Low Estradiol level")+
+  theme(legend.text = element_text(size = 15),
+          legend.title = element_blank(),
+          legend.position = c(0.2,0.9),
+          axis.title.x = element_text(size = 15),
+          axis.title.y = element_text(size = 15),) + 
+  geom_text_repel(max.overlaps = Inf) 
+# Save the plot to a file
+ggsave("../result/pbmc/img/estrogen_volcano_plot.png", plot = volcano_plot, width = 6, height = 8, dpi = 300)
+
+# Display the plot in the document
+print(volcano_plot)
+```
+```{r}
+table(res.mod$diffexpres.modsed)
+```
+So, with an adjusted p-value of 0.05, we identify 12 downregulated genes and 13 upregulated genes in the high estradiol group compared to the low estradiol group.
+
+```{r}
+write.csv(res.mod, file = "../result/pbmc/estrogen_DEGs_result.csv", row.names = TRUE) # save the results of all genes to a csv file
+```
+
+```{r}
+significant_genes <- res.mod[!is.na(res.mod$padj) & res.mod$padj < 0.05 & (res.mod$log2FoldChange >= 1 | res.mod$log2FoldChange <= -1), ]
+write.csv(significant_genes, file = "../result/pbmc/estrogen_significant_DEGs.csv", row.names = FALSE) # save the results of only significant genes to a csv file
+```
+
+## Heatmap
+
+```{r}
+# Create a data frame for heatmap with significant genes
+df_for_heatmap <- significant_genes
+df_for_heatmap$label <- ""
+df_for_heatmap$label[df_for_heatmap$log2FoldChange <= -1] <- "Down"
+df_for_heatmap$label[df_for_heatmap$log2FoldChange >= 1] <- "Up"
+df_for_heatmap <- as.data.frame(df_for_heatmap, row.names = df_for_heatmap$ENSEMBL)
+sig_genes <- rownames(df_for_heatmap)
+sig_genes
+```
+
+```{r}
+### Extract normalized expression for significant genes from high and low samples
+norm_OEsig <- normalized_counts[sig_genes,]
+head(norm_OEsig)
+```
+
+```{r}
+# add annotation for heatmap
+annotation_col = subset(metadata.subset,select = "group")
+annotation_row = subset(df_for_heatmap,select = "label")
+
+### Run pheatmap using the metadata data frame for the annotation
+pheatmap(norm_OEsig, 
+    annotation_row = annotation_row,
+    annotation_col = annotation_col,
+    cluster_rows = T, 
+    show_rownames = F,
+    border_color = NA, 
+    fontsize = 10, 
+    scale = "row", 
+    fontsize_row = 10, 
+    height = 20)
+```
+
+## Plot count of top 5 genes
+
+### Custom plot counts of the top genes (which label of estradiol level)
+
+```{r}
+library(ggplot2)
+library(ggrepel)
+library(dplyr)
+
+# Get top 5 significant genes
+top5_genes <- rownames(res[order(res$padj), ])[1:5]
+
+# Combine data for all 5 genes
+combined_data <- lapply(top5_genes, function(gene_id) {
+  d <- plotCounts(dds, gene = gene_id, intgroup = "group", returnData = TRUE)
+  d$estradiol <- metadata.subset$estradiol[match(rownames(d), rownames(metadata.subset))]
+  gene_symbol <- res.mod$SYMBOL[res.mod$ENSEMBL == gene_id]
+  d$gene <- gene_symbol
+  return(d)
+}) %>% bind_rows()
+
+# Plot all 5 genes in one boxplot with facets
+p <- ggplot(combined_data, aes(x = group, y = count, color = group)) +
+  geom_boxplot(outlier.shape = NA) +
+  facet_wrap(~ gene, scales = "free_y") +
+  labs(title = "Expression of Top 5 DEGs", x = "Group", y = "Normalized Counts") +
+  theme_minimal()
+
+ggsave("../result/pbmc/img/boxplot_top5_genes.jpg", p, width = 10, height = 6, dpi = 300)
+print(p)
+```
+## Exploratory analysis and visualization
+
+### Transformations
+
+```{r}
+vst <- vst(dds, blind=FALSE)
+head(assay(vst))
+```
+
+```{r}
+library(vsn)
+meanSdPlot(assay(vst), ranks = FALSE)
+```
+
+### Box-and-whisker plot
+
+```{r}
+# Order samples by group
+sample_ordered <- metadata.subset[order(metadata.subset$group),]
+sample_id_ordered <- rownames(sample_ordered)
+sample_ordered$group <- as.factor(sample_ordered$group)
+
+# Reorder rlog data
+vst_ordered <- vst[, sample_id_ordered]
+
+# Assign colors to each group
+group_colors <- as.character(as.numeric(sample_ordered$group))  # 1, 2, etc.
+group_colors <- c("skyblue", "orange")[as.numeric(sample_ordered$group)]  # custom colors
+
+# Create boxplot
+boxplot(assay(vst_ordered),
+        col = group_colors,
+        las = 2,                # rotate x-axis labels
+        outline = FALSE,        # don't plot outliers
+        main = "Boxplot of vst-transformed counts",
+        ylab = "vst-transformed counts")
+
+# Add legend
+legend("topright",
+       legend = levels(sample_ordered$group),
+       fill = c("skyblue", "orange"),
+       title = "Group")
+```
+
+
+### PCA plot
+
+```{r}
+p <- pca(assay(vst), metadata = metadata.subset, removeVar = 0.1)
+screeplot(p)
+```
+
+
+```{r}
+pairsplot(p, 
+          components = c(1:4), 
+          triangle = TRUE, 
+          trianglelabSize = 12, 
+          hline = 0, vline = 0, 
+          pointSize = 3, 
+          gridlines.major = FALSE, gridlines.minor = FALSE, 
+          title = 'Pairs plot', plotaxes = FALSE, 
+          margingaps = unit(c(-0.01, -0.01, -0.01, -0.01), 'cm'), 
+          colby = 'group',
+          lab = round(p$metadata$estradiol),
+          labSize = 5,)
+```
+
+# Extract data of DEGs for downstream analysis
+
+## Filter all genes with p-value < 0.05
+
+```{r}
+res.df <- data.frame(res)
+degs_by_pvalue <- res.df[res.df$pvalue <0.05 & !is.na(res.df$pvalue),] #filter all degs with adjusted p-value < 0.05
+degs_by_pvalue
+```
+
+## Add gene annotation
+
+```{r}
+# Add Ensembl as a column to merge
+degs_by_pvalue$ensembl_gene_id <- rownames(degs_by_pvalue)
+
+# Merge annotation
+annotated_degs_by_pvalue <- merge(degs_by_pvalue, annotation, by.x = "ensembl_gene_id",by.y = 'ENSEMBL', all.x = TRUE)
+annotated_degs_by_pvalue
+```
+
+## Filter duplicated gene symbol
+
+```{r}
+annotated_degs_by_pvalue <- annotated_degs_by_pvalue %>%
+  arrange(pvalue) %>% # Order by p-value in ascending order
+  filter(SYMBOL != "") %>% # Filter out rows where the SYMBOL is an empty string
+  distinct(SYMBOL, .keep_all = TRUE) %>% # Remove duplicate rows based on the SYMBOL column, keeping the first one which is the one with the lowest p-value
+  filter(!is.na(ensembl_gene_id)) # Filter out rows where the ensembl_gene_id is NA
+annotated_degs_by_pvalue
+
+```
+
+## Extract vst transformed data for machine learning
+
+```{r}
+filtered_tx_id <- annotated_degs_by_pvalue$ensembl_gene_id
+vst_matrix <- assay(vst)
+vst_degs_by_pvalue <- vst_matrix[filtered_tx_id, ]
+head(vst_degs_by_pvalue)
+```
+
+```{r}
+vst_degs_by_pvalue <- cbind(gene_symbol = annotated_degs_by_pvalue$SYMBOL, vst_degs_by_pvalue)
+# write.csv(vst_degs_by_pvalue, file = "../result/pbmc/estrogen_vst_DEGs_expression_by_pvalue.csv", row.names = TRUE)
+write.csv(metadata.subset, file = "../result/pbmc/estrogen_clinical_data.csv")
+```
+
+# Extract expression of all genes with symbol
+
+```{r}
+df_res <- as.data.frame(res)
+df_res_ordered_by_pvalue <- df_res[order(df_res$pvalue),]
+df_res_ordered_by_pvalue$ENSEMBL <- rownames(df_res_ordered_by_pvalue)
+annotated_df_res_ordered_by_pvalue <- merge(df_res_ordered_by_pvalue,annotation,by='ENSEMBL',all.x = TRUE)
+```
+
+```{r}
+# remove duplicated and NA values in SYMBOL column
+annotated_df_res_ordered_by_pvalue <- annotated_df_res_ordered_by_pvalue %>%
+  filter(!is.na(SYMBOL)) %>%
+  distinct(SYMBOL, .keep_all = TRUE) %>%
+  filter(!is.na(ENSEMBL))
+```
+
+```{r}
+all_gene_id <- annotated_df_res_ordered_by_pvalue$ENSEMBL
+all_vst_matrix <- vst_matrix[all_gene_id,]
+```
+
+```{r}
+all_rld_matrix <- cbind(gene_symbol = annotated_df_res_ordered_by_pvalue$SYMBOL,all_vst_matrix)
+write.csv(all_rld_matrix, file = "../result/pbmc/estrogen_vst_all_genes.csv",row.names = TRUE)
+```
+

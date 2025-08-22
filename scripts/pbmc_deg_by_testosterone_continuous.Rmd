@@ -1,0 +1,185 @@
+---
+title: "DEGs analysis based on contrinuous testosterone level in PBMC dataset"
+output: html_notebook
+---
+
+```{r}
+rm(list = ls())  # Removes all variables and functions from global environment
+getwd()
+```
+
+```{r}
+setwd("C:/Users/ngduy/Documents/Project/Final_code")
+```
+
+# Install necessary packages
+
+```{r}
+# BiocManager::install("tximport")
+# BiocManager::install("tximportData")
+# BiocManager::install("DESeq2")
+# install.packages('pheatmap')
+# install.packages("DOSE")
+# install.packages("enrichplot")
+# install.packages("ggupset")
+# BiocManager::install("biomaRt")
+# BiocManager::install("pathview")
+```
+
+# Load packages
+
+```{r}
+library(biomaRt) # BiomaRt is used to access Ensembl databases for gene annotation
+library(tximport) # Import transcript-level quantification data
+library(readr) # For reading data files
+library(DESeq2)
+library(dplyr) # for data manipulation
+library(PCAtools) # PCAtools is used for PCA analysis and visualization
+library(tidyverse) # includes ggplot2, for data visualisation. dplyr, for data manipulation.
+library(pheatmap)
+library('org.Hs.eg.db') # Annotation package for human genes
+library(GEOquery) # For downloading and processing data from GEO
+```
+
+# Data import
+
+## Import phenotype data
+
+```{r}
+metadata <- readxl::read_xlsx("../data/pbmc/pbmc_metadata.xlsx")
+metadata <- as.data.frame(metadata)
+metadata <- metadata[!is.na(metadata[[1]]),]
+
+#Because RS10, RS15 kallisto files are missing, so we get rid of these samples in metadata
+row.names(metadata) <- metadata$`RESOLVE Subject ID number`
+metadata <-metadata[!row.names(metadata) %in% c("RS10","RS15"),]
+head(metadata)
+```
+
+### Manipulate metadata to obtain necessary information
+
+In this analysis, we use the information of testosterone level, BMI, age, so we use dplyr package to select and rename the columns we need
+
+```{r}
+metadata.subset <- metadata %>%
+  dplyr::select(c(2,3,28,12)) %>%
+  dplyr::rename(testosterone = 3,
+         sex = 1,
+         age = 2,
+         BMI = 4) %>%
+  dplyr::mutate(testosterone = log(testosterone))
+
+# check the data
+head(metadata.subset)
+```
+```{r}
+# filter for female samples only with testosterone level
+metadata.subset <- metadata.subset %>%
+  filter(sex == "Male")%>%
+  filter(!is.na(testosterone))
+head(metadata.subset)
+```
+
+
+## Import count data
+
+```{r}
+# Vector of folders of all samples
+samples <- row.names(metadata.subset)
+samples
+sample_folders <- paste0(samples,"_PBMC_2")
+sample_folders
+
+# Create vector of paths to each abundance file
+files <- file.path("../data/pbmc/pbmc_count_data/Kallisto abundance/PBMC",sample_folders,"abundance.tsv")
+names(files) <- samples
+
+#match transcripts and genes
+tx2gene <- read.csv("../data/pbmc/pbmc_count_data/Kallisto abundance/gene_info.txt", sep="\t",header=T)
+tx2gene <- tx2gene[,c(1,2)]
+tx2gene
+
+# load the Kallisto expression estimates using tximport
+txi <- tximport(files,
+                type = "kallisto",
+                tx2gene = tx2gene,
+                ignoreTxVersion = FALSE,
+                countsFromAbundance = "lengthScaledTPM") 
+```
+# Differentially expressed genes analysis
+
+## Create data object
+
+```{r}
+y <- DGEList(txi$counts, samples  = metadata.subset)
+```
+
+
+## Annotation
+```{r}
+#add gene symbol and gene name
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+all_gene_id <- row.names(y$counts)
+annotation <- AnnotationDbi::mapIds(org.Hs.eg.db,
+                     keys = all_gene_id,
+                     column = "SYMBOL",
+                     keytype = "ENSEMBL",
+                     multiVals = "first") # multiVals = "first" will keep the first value for each gene if there are multiple values
+```
+
+```{r}
+annotation <- data.frame(SYMBOL = annotation,
+           stringsAsFactors = FALSE)
+y$genes <- annotation
+```
+
+
+## Filtering and Normalization
+
+Different Ensembl transcripts for the same gene symbol count predominantly the same reads.
+So we keep one transcript for each gene symbol. We choose the transcript with highest
+overall count:
+
+```{r}
+o <- order(rowSums(y$counts), decreasing=TRUE)
+y <- y[o,]
+```
+
+```{r}
+d <- duplicated(y$genes$SYMBOL)
+y <- y[!d,]
+nrow(y)
+```
+
+```{r}
+# Calculate normalization factors
+y <- calcNormFactors(y)
+y
+```
+
+```{r}
+# filtering using the design information
+design <- model.matrix(~ testosterone + BMI + age, data = metadata.subset)
+keep <- filterByExpr(y, design)
+y <- y[keep, ]
+```
+
+## Differential expression
+
+```{r}
+vwts <- voom (y, design, plot=TRUE)
+fit <- lmFit(vwts, design)
+tmp <- contrasts.fit(fit, coef = 2)
+tmp <- eBayes(tmp)
+top.table <- topTable(tmp, coef = "testosterone", sort.by = "P", n = Inf)
+head(top.table, 20)
+```
+
+So, with an adjusted p-value of 0.05, we identify 12 downregulated genes and 13 upregulated genes in the high testosterone group compared to the low testosterone group.
+
+```{r}
+write.csv(top.table, file = "../result/pbmc/testosterone_continuous_DEGs_result.csv", row.names = TRUE) # save the results of all genes to a csv file
+```
+
+

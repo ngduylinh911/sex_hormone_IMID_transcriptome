@@ -1,0 +1,210 @@
+---
+title: "Correlation Analysis of Female Rheumatoid Arthritis Patients"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+rm(list = ls())
+getwd()
+```
+
+```{r}
+setwd("C:/Users/ngduy/Documents/Project/Final_code")
+```
+
+1. Import Libraries
+We start by loading the necessary R libraries for data manipulation, statistical analysis, and plotting.
+```{r}
+# install.packages("ppcor")
+```
+
+
+```{r}
+
+library(tidyverse)
+library(stats)
+library(rstatix)
+library(ggpubr)
+library(ppcor)
+```
+2. Load List of Differentially Expressed (DE) Genes
+The list of differentially expressed genes is loaded from a CSV file. These genes were previously identified in a separate analysis.
+
+```{r}
+
+de_genes_df <- read.csv("../result/pbmc/estrogen_significant_DEGs.csv", row.names = 1)
+head(de_genes_df)
+de_genes_list <- unique(de_genes_df$SYMBOL)
+de_genes_list <- de_genes_list[!is.na(de_genes_list)]
+de_genes_list
+```
+3. Load Expression and Metadata of RA Patients
+We load the gene expression data and corresponding metadata for female rheumatoid arthritis (RA) patients.
+
+```{r}
+
+expression_df <- read.csv("../result/RA/female_RA_expression_data.csv", row.names = 1)
+metadata_df <- read.csv("../result/RA/female_RA_metadata.csv", row.names = 1)
+
+# Display the first few rows of the dataframes
+head(expression_df)
+head(metadata_df)
+```
+4. Filter Data for Relevant Samples
+The metadata is filtered to include only female patients with rheumatoid arthritis, and with an age between 20 and 36, inclusive. Samples with missing DAS28 scores are also removed. The expression data is then filtered to match the remaining samples.
+
+```{r}
+
+# Filter metadata for specified criteria and remove NA values in DAS28 scores
+filtered_metadata <- metadata_df %>%
+  filter(sex == "Female", age >= 20, age <= 36) %>%
+  drop_na(x.clinical.data.00.baseline.das.das28.00bl)
+
+dim(filtered_metadata)
+
+# Filter expression data to match the samples in the filtered metadata
+cd_expression_df <- expression_df[, rownames(filtered_metadata)]
+dim(cd_expression_df)
+```
+5. Select Genes for Correlation Analysis
+We create a list of differentially expressed genes that are also present in the filtered expression data. This ensures that we only test genes for which we have expression data.
+
+```{r}
+
+cd_de_genes_list <- intersect(de_genes_list, rownames(cd_expression_df))
+cd_de_genes_list
+```
+6. Perform Correlation and Normality Tests
+For each selected gene, we perform a correlation test to determine the relationship between its expression level and the patient's DAS28 disease score, while controlling for age.
+
+First, we check for normality of both gene expression and DAS28 scores using the Shapiro-Wilk test. If both are normally distributed (p0.05), we use Pearson's partial correlation. If either is not normally distributed, we use Spearman's partial correlation.
+
+```{r}
+
+results_list <- list()
+alpha_normality <- 0.05
+min_samples_for_shapiro <- 3
+
+for (gene in cd_de_genes_list) {
+  gene_expr <- as.numeric(cd_expression_df[gene, ])
+  disease_scores <- as.numeric(filtered_metadata$x.clinical.data.00.baseline.das.das28.00bl)
+  age <- as.numeric(filtered_metadata$age)
+  
+  test_data <- data.frame(
+    gene_expr = gene_expr,
+    disease_scores = disease_scores,
+    age = age
+  )
+  
+  # Remove rows with NA values
+  test_data <- na.omit(test_data)
+  
+  # Check for sufficient data points for normality test
+  if (nrow(test_data) < min_samples_for_shapiro) {
+    is_normal_gene_expr <- FALSE
+    is_normal_disease_score <- FALSE
+    test_type <- "Spearman"
+  } else {
+    shapiro_gene_p <- shapiro.test(test_data$gene_expr)$p.value
+    shapiro_disease_p <- shapiro.test(test_data$disease_scores)$p.value
+    
+    is_normal_gene_expr <- shapiro_gene_p > alpha_normality
+    is_normal_disease_score <- shapiro_disease_p > alpha_normality
+    
+    test_type <- ifelse(is_normal_gene_expr & is_normal_disease_score, "Pearson", "Spearman")
+  }
+
+  # Perform partial correlation test
+  if (test_type == "Pearson") {
+    corr_result <- pcor.test(test_data$gene_expr, test_data$disease_scores, test_data$age, method = "pearson")
+  } else {
+    corr_result <- pcor.test(test_data$gene_expr, test_data$disease_scores, test_data$age, method = "spearman")
+  }
+  
+  results_list[[gene]] <- data.frame(
+    Gene = gene,
+    CorrelationCoefficient = corr_result$estimate,
+    PValue = corr_result$p.value,
+    TestType = test_type,
+    GeneExpr_Normal = is_normal_gene_expr,
+    DiseaseScore_Normal = is_normal_disease_score
+  )
+}
+
+results_df <- do.call(rbind, results_list)
+rownames(results_df) <- NULL
+
+# Add significance stars
+results_df <- results_df %>%
+  mutate(Significance = case_when(
+    PValue < 0.001 ~ "***",
+    PValue < 0.01 ~ "**",
+    PValue < 0.05 ~ "*",
+    TRUE ~ "ns"
+  )) %>%
+  arrange(PValue)
+
+print("Correlation Results for Selected Genes:")
+print(results_df)
+
+write.csv(results_df, "../result/pbmc/corr_testing_result_estrogen_DEGs_vs_DAS28.csv", row.names = FALSE)
+
+significant_genes <- results_df %>%
+  filter(PValue < 0.05) %>%
+  pull(Gene)
+
+cat("\nNumber of significant genes (p-value < 0.05):", length(significant_genes), "\n")
+```
+The analysis identified r length(significant_genes) gene(s) with a significant correlation (p-value < 0.05) between its expression and the DAS28 score, adjusted for age. The gene is r significant_genes.
+
+7. Visualization of Correlation
+A scatter plot is generated for the gene(s) with a significant correlation. The plot shows the relationship between the gene's expression and the DAS28 disease score, along with a regression line and the statistical results.
+
+```{r}
+# Check if there are significant genes to plot
+if (length(significant_genes) > 0) {
+
+  # Loop through each significant gene and create a scatter plot
+  for (gene_to_plot in significant_genes) {
+    # Extract data for the current gene
+    gene_expr <- as.numeric(cd_expression_df[gene_to_plot, ])
+    disease_scores <- as.numeric(filtered_metadata$x.clinical.data.00.baseline.das.das28.00bl)
+
+    # Create a data frame for plotting
+    plot_data <- data.frame(
+      Gene_Expression = gene_expr,
+      DAS28_Score = disease_scores
+    )
+
+    # Get the correlation test results for the current gene
+    corr_info <- results_df %>%
+      filter(Gene == gene_to_plot)
+
+    # Determine the test method for the plot label
+    test_method <- corr_info$TestType[1]
+
+    # Create the scatter plot
+    p <- ggscatter(plot_data, x = "DAS28_Score", y = "Gene_Expression",
+                   add = "reg.line", conf.int = TRUE,
+                   cor.coef = FALSE,
+                   cor.method = tolower(test_method),
+                   xlab = "DAS28 Disease Activity Score",
+                   ylab = paste("Relative expression of", gene_to_plot)) +
+         labs(subtitle = paste0(
+                                " r = ", round(corr_info$CorrelationCoefficient[1], 3),
+                                ", p = ", format.pval(corr_info$PValue[1], digits = 3),
+                                " (", corr_info$Significance,")")) +
+         ggtitle(paste("Correlation between", gene_to_plot, "Expression and DAS28 Score"))
+    # save the plot to a file
+    ggsave(filename = paste0("../result/pbmc/correlation_testing_result/estrogen_DEGs/correlation_plot_", gene_to_plot, ".png"), plot = p, width = 7, height = 5, dpi = 300)
+    # Print the plot
+    print(p)
+  }
+} else {
+  cat("\nNo significant genes to plot (p-value >= 0.05).\n")
+}
+```
+

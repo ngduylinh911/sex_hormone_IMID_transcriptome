@@ -1,0 +1,116 @@
+  ---
+title: "Heatmap of Disease Association Scores for estrogen DEGs"
+output: html_notebook
+---
+
+```{r}
+rm(list = ls())  # Removes all variables and functions from global environment
+getwd()
+```
+
+```{r}
+setwd("C:/Users/ngduy/Documents/Project/Final_code")
+```
+
+# Load packages
+
+```{r}
+library(dplyr)
+library(tidyverse) # includes ggplot2, for data visualisation. dplyr, for data manipulation.
+library(pheatmap)
+```
+
+# Read gene list
+
+```{r}
+degs <- read.csv("../result/pbmc/estrogen_significant_DEGs.csv", sep = ",", header = T)
+gene_list <- degs %>%
+  dplyr::select('SYMBOL',"diffexpres.modsed")%>%
+  dplyr::rename(direction = 2)
+
+rownames(gene_list) <- gene_list$SYMBOL
+```
+
+# Read IMIDs association score
+
+```{r}
+disease <- c("MS","RA","SLE","UC","CD","psoriasis")
+for (i in disease) { # Corrected for loop syntax
+  file_path <- paste0("../data/association/", i, "_association.tsv")
+
+  if (!file.exists(file_path)) {
+    stop(paste0("File for ", i, " does not exist. Please check the file path: ", file_path))
+  }
+  print(paste0("File for ", i, " exists. Proceeding with the analysis."))
+
+  # Read and process the score file
+  score_df <- read.csv(file_path, header = TRUE, sep = "\t") %>%
+    distinct(symbol, .keep_all = TRUE) %>%
+    dplyr::select(symbol, globalScore)
+
+  # Dynamically rename the 'globalScore' column to the current disease name (i)
+  # using the .data pronoun or by constructing the rename argument
+  # Option 1: Using `rename_with` (more flexible for multiple columns or patterns)
+  gene_list <- gene_list %>%
+    left_join(score_df, by = c("SYMBOL" = "symbol")) %>%
+    rename_with(~ i, .cols = globalScore) # Renames globalScore to the value of i
+}
+gene_list[is.na(gene_list)] <- 0  # Replace NA values with 0
+gene_list <- tibble::column_to_rownames(gene_list, var = "SYMBOL") # Remove SYMBOL column after setting row names
+gene_list
+#save gene_list to file
+write.csv(gene_list, "../result/association/estrogen_DEG_asso_score.csv", row.names = TRUE)
+```
+
+# Create heatmap
+
+```{r}
+annotation_row <- subset(gene_list, select = "direction") # Create annotation for rows
+pheatmap(gene_list[, -1], # Exclude the first column (SYMBOL) from the heatmap data,
+         main = "Gene Association Scores Across Diseases", # Title of the heatmap
+         annotation_row = annotation_row, # Add row annotations (gene symbols)
+         cluster_rows = TRUE, # Cluster genes (rows) based on similarity
+         cluster_cols = TRUE, # Cluster diseases (columns) based on similarity
+         show_rownames = TRUE, # Show gene symbols on the rows
+         show_colnames = TRUE, # Show disease names on the columns
+         fontsize_row = 8,    # Adjust font size for row labels (gene names)
+         fontsize_col = 10,   # Adjust font size for column labels (disease names)
+         color = colorRampPalette(c("white", "orange", "red"))(50), # Color scale
+         border_color = "grey60", # Add borders to cells for better separation
+         cellwidth = 40, # Adjust cell width
+         cellheight = 10 # Adjust cell height
+)
+```
+
+# heatmap without rows with aggregated scores lower than 0.1
+
+```{r}
+# Remove rows with all NA values
+gene_list_filtered <- gene_list %>%
+  filter(
+    # Check if the sum of all numeric columns in a row is not 0
+    # `across(where(is.numeric), ...)` applies the function to only numeric columns
+    # `rowSums(pick(where(is.numeric)))` is a more modern way to do this in dplyr
+    # `na.rm = TRUE` handles any NAs in numeric columns for the sum.
+    rowSums(pick(where(is.numeric)), na.rm = TRUE) >= 0.1
+  )
+
+annotation_row_filtered <- subset(gene_list_filtered, select = "direction") # Create annotation for rows after filtering
+pheatmap(gene_list_filtered[, -1], # Exclude the first column (SYMBOL) from the heatmap data
+         main = "Estrogen Gene Association Scores Across Diseases", # Title of the heatmap,
+         annotation_row = annotation_row_filtered, # Add row annotations (gene symbols)
+         cluster_rows = TRUE, # Cluster genes (rows) based on similarity
+         cluster_cols = TRUE, # Cluster diseases (columns) based on similarity
+         show_rownames = TRUE, # Show gene symbols on the rows
+         show_colnames = TRUE, # Show disease names on the columns
+         fontsize_row = 8,    # Adjust font size for row labels (gene names)
+         fontsize_col = 10,   # Adjust font size for column labels (disease names)
+         color = colorRampPalette(c("white", "orange", "red"))(50), # Color scale
+         border_color = "grey60", # Add borders to cells for better separation
+         cellwidth = 40, # Adjust cell width
+         cellheight = 10, # Adjust cell height,
+         filename = "../result/association/heatmap_estrogen_DEG_asso_score.png" # Save heatmap to file
+)
+
+```
+
